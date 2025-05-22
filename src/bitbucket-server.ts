@@ -15,6 +15,8 @@ import {
   BitbucketConfig,
   PullRequestInput,
   PullRequestParams,
+  MergeOptions,
+  CommentOptions
 } from './types.js';
 
 import {
@@ -25,11 +27,15 @@ import {
   addComment,
   getDiff,
   getReviews,
-  addInlineComment,
   listRepositories,
   listPullRequests,
   listBranches,
   getRepositoryDetails,
+  addInlineComment,
+  getRepositoryArchive,
+  getPullRequestComments,
+  approvePullRequest,
+  unapprovePullRequest,
 } from './bitbucket-api.js';
 
 // Logger configuration
@@ -322,122 +328,134 @@ export class BitbucketServer {
             },
             required: ['repository', 'prId']
           }
+        },
+        {
+          name: 'approve_pull_request',
+          description: 'Approve a pull request',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              project: { type: 'string', description: 'Bitbucket project key' },
+              repository: { type: 'string', description: 'Repository slug' },
+              prId: { type: 'number', description: 'Pull request ID' }
+            },
+            required: ['repository', 'prId']
+          }
+        },
+        {
+          name: 'unapprove_pull_request',
+          description: 'Unapprove (reject approval for) a pull request',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              project: { type: 'string', description: 'Bitbucket project key' },
+              repository: { type: 'string', description: 'Repository slug' },
+              prId: { type: 'number', description: 'Pull request ID' }
+            },
+            required: ['repository', 'prId']
+          }
+        },
+        {
+          name: 'get_repository_archive',
+          description: 'Download the entire repository as a zip or tar archive',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              project: { type: 'string', description: 'Bitbucket project key' },
+              repository: { type: 'string', description: 'Repository slug' },
+              format: {
+                type: 'string',
+                enum: ['zip', 'tar'],
+                description: 'Archive format (zip or tar, default is zip)'
+              },
+              at: { type: 'string', description: 'Branch or commit to download (optional)' }
+            },
+            required: ['project', 'repository']
+          }
+        },
+        {
+          name: 'get_pull_request_comments',
+          description: 'Get all comments on a pull request',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              project: { type: 'string', description: 'Bitbucket project key' },
+              repository: { type: 'string', description: 'Repository slug' },
+              prId: { type: 'number', description: 'Pull request ID' }
+            },
+            required: ['project', 'repository', 'prId']
+          }
         }
       ]
     }));
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      try {
-        logger.info(`Called tool: ${request.params.name}`, { arguments: request.params.arguments });
-        const args = request.params.arguments ?? {};
+      const { name: toolName, arguments: toolInput } = request.params;
+      const { project: inputProject, repository, prId, ...options } = toolInput as Record<string, any>;
+      const project = inputProject ?? this.config.defaultProject;
 
-        const pullRequestParams: PullRequestParams = {
-          project: (args.project as string) ?? this.config.defaultProject,
-          repository: args.repository as string,
-          prId: args.prId as number
+      if (!project && ['list_repositories', 'create_pull_request', 'list_pull_requests', 'list_branches', 'get_repository_details', 'get_pull_request', 'merge_pull_request', 'decline_pull_request', 'add_comment', 'get_diff', 'get_reviews', 'add_inline_comment', 'suggest_code_change', 'delete_pull_request', 'get_repository_archive', 'get_pull_request_comments', 'approve_pull_request', 'unapprove_pull_request'].includes(toolName)) {
+        return {
+          content: [{ type: 'error', text: 'Project key is required if BITBUCKET_DEFAULT_PROJECT is not set.' }]
         };
+      }
 
-        if (!pullRequestParams.project) {
-          throw new McpError(
-            ErrorCode.InvalidParams,
-            'Project must be provided either as a parameter or through BITBUCKET_DEFAULT_PROJECT environment variable'
-          );
-        }
+      const prParams: PullRequestParams = { project, repository, prId };
 
-        switch (request.params.name) {
+      try {
+        switch (toolName) {
           case 'list_repositories':
-            if (!args.project || typeof args.project !== 'string') {
-              throw new McpError(
-                ErrorCode.InvalidParams,
-                'Project key is required'
-              );
-            }
-            return await listRepositories(this.api, args.project);
+            return await listRepositories(this.api, project);
           case 'list_pull_requests':
-            if (!args.project || typeof args.project !== 'string' || !args.repository || typeof args.repository !== 'string') {
-              throw new McpError(
-                ErrorCode.InvalidParams,
-                'Project and repository are required'
-              );
-            }
-            return await listPullRequests(this.api, args.project, args.repository);
+            return await listPullRequests(this.api, project, repository);
           case 'list_branches':
-            if (!args.project || typeof args.project !== 'string' || !args.repository || typeof args.repository !== 'string') {
-              throw new McpError(
-                ErrorCode.InvalidParams,
-                'Project and repository are required'
-              );
-            }
-            return await listBranches(this.api, args.project, args.repository);
+            return await listBranches(this.api, project, repository);
           case 'get_repository_details':
-            if (!args.project || typeof args.project !== 'string' || !args.repository || typeof args.repository !== 'string') {
-              throw new McpError(
-                ErrorCode.InvalidParams,
-                'Project and repository are required'
-              );
-            }
-            return await getRepositoryDetails(this.api, args.project, args.repository);
+            return await getRepositoryDetails(this.api, project, repository);
           case 'create_pull_request':
-            // If reviewers not provided, use BITBUCKET_DEFAULT_REVIEWERS env
-            if (!Array.isArray(args.reviewers) || args.reviewers.length === 0) {
-              const defaultReviewers = process.env.BITBUCKET_DEFAULT_REVIEWERS;
-              if (defaultReviewers) {
-                args.reviewers = defaultReviewers.split(',').map(r => r.trim()).filter(Boolean);
-              }
+            if (this.isPullRequestInput(toolInput)) {
+              return await createPullRequest(this.api, { ...toolInput, project });
             }
-            if (!this.isPullRequestInput(args)) {
-              throw new McpError(
-                ErrorCode.InvalidParams,
-                'Invalid pull request input parameters'
-              );
-            }
-            return await createPullRequest(this.api, args);
+            return { content: [{ type: 'error', text: 'Invalid input for create_pull_request' }] };
           case 'get_pull_request':
-            return await getPullRequest(this.api, pullRequestParams);
+            return await getPullRequest(this.api, prParams);
           case 'merge_pull_request':
-            return await mergePullRequest(this.api, pullRequestParams, {
-              message: args.message as string,
-              strategy: args.strategy as 'merge-commit' | 'squash' | 'fast-forward'
-            });
+            return await mergePullRequest(this.api, prParams, options as MergeOptions);
           case 'decline_pull_request':
-            return await declinePullRequest(this.api, pullRequestParams, args.message as string);
+            return await declinePullRequest(this.api, prParams, options.message as string);
           case 'add_comment':
-            return await addComment(this.api, pullRequestParams, {
-              text: args.text as string,
-              parentId: args.parentId as number
-            });
+            return await addComment(this.api, prParams, options as CommentOptions);
           case 'get_diff':
-            return await getDiff(this.api, pullRequestParams, args.contextLines as number);
+            return await getDiff(this.api, prParams, options.contextLines as number);
           case 'get_reviews':
-            return await getReviews(this.api, pullRequestParams);
-          case 'add_inline_comment':
-            return await addInlineComment(this.api, pullRequestParams, {
-              text: args.text as string,
-              filePath: args.filePath as string,
-              line: args.line as number,
-              lineType: args.lineType as 'CONTEXT' | 'ADDED' | 'REMOVED',
-              startColumn: args.startColumn as number,
-              endColumn: args.endColumn as number,
-              parentId: args.parentId as number
-            });
-          case 'suggest_code_change':
-            return await addInlineComment(this.api, pullRequestParams, {
-              text: args.message as string,
-              filePath: args.filePath as string,
-              line: args.line as number,
-              lineType: args.lineType as 'CONTEXT' | 'ADDED' | 'REMOVED',
-              suggestedCode: args.suggestedCode as string,
-              parentId: args.parentId as number
-            });
-          case 'delete_pull_request':
-            return await declinePullRequest(this.api, pullRequestParams, args.message as string);
+            return await getReviews(this.api, prParams);
+          case 'add_inline_comment': {
+            const { text, filePath, line, lineType, startColumn, endColumn, parentId } = options;
+            return await addInlineComment(this.api, prParams, { text, filePath, line, lineType, startColumn, endColumn, parentId });
+          }
+          case 'suggest_code_change': {
+            const { filePath, line, lineType, message, suggestedCode, parentId } = options;
+            // The 'text' property for suggest_code_change is the 'message' from inputSchema
+            return await addInlineComment(this.api, prParams, { text: message, filePath, line, lineType, suggestedCode, parentId });
+          }
+          case 'delete_pull_request': // Effectively decline
+            return await declinePullRequest(this.api, prParams, options.message as string);
+          case 'get_repository_archive': {
+            const { format, at } = options;
+            return await getRepositoryArchive(this.api, project, repository, format, at);
+          }
+          case 'get_pull_request_comments':
+            return await getPullRequestComments(this.api, prParams);
+          case 'approve_pull_request':
+            return await approvePullRequest(this.api, prParams);
+          case 'unapprove_pull_request':
+            return await unapprovePullRequest(this.api, prParams);
           default:
-            throw new McpError(
-              ErrorCode.MethodNotFound,
-              `Unknown tool: ${request.params.name}`
-            );
+            return {
+              content: [{ type: 'error', text: `Unknown tool: ${toolName}` }]
+            };
         }
-      } catch (error) {
+      } catch (error: any) {
         logger.error('Tool execution error', { error });
         if (axios.isAxiosError(error)) {
           throw new McpError(

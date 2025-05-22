@@ -223,3 +223,73 @@ export async function addInlineComment(
     content: [{ type: 'text', text: JSON.stringify(response.data, null, 2) }]
   };
 }
+
+// Download the entire repository as an archive (zip or tar)
+export async function getRepositoryArchive(
+  api: AxiosInstance,
+  project: string,
+  repository: string,
+  format: 'zip' | 'tar' = 'zip',
+  at?: string
+) {
+  const params: Record<string, string> = { format };
+  if (at) params.at = at;
+  const response = await api.get(
+    `/projects/${project}/repos/${repository}/archive`,
+    {
+      params,
+      responseType: 'arraybuffer',
+    }
+  );
+  // Return as base64 string for transport
+  return {
+    content: [
+      {
+        type: 'file',
+        filename: `${repository}.${format}`,
+        encoding: 'base64',
+        data: Buffer.from(response.data).toString('base64'),
+      },
+    ],
+  };
+}
+
+// Get all comments on a pull request
+export async function getPullRequestComments(
+  api: AxiosInstance,
+  params: PullRequestParams
+) {
+  const { project, repository, prId } = params;
+  const response = await api.get(
+    `/projects/${project}/repos/${repository}/pull-requests/${prId}/activities`
+  );
+  // Filter for comment actions
+  const comments = (response.data.values || []).filter(
+    (activity: any) => activity.action === 'COMMENTED' && activity.comment
+  );
+  return {
+    content: [{ type: 'text', text: JSON.stringify(comments, null, 2) }]
+  };
+}
+
+// Approve a pull request
+export async function approvePullRequest(api: AxiosInstance, params: PullRequestParams) {
+  const { project, repository, prId } = params;
+  const response = await api.post(
+    `/projects/${project}/repos/${repository}/pull-requests/${prId}/approve`
+  );
+  return {
+    content: [{ type: 'text', text: JSON.stringify(response.data, null, 2) }]
+  };
+}
+
+// Unapprove a pull request (reject approval)
+export async function unapprovePullRequest(api: AxiosInstance, params: PullRequestParams) {
+  const { project, repository, prId } = params;
+  const response = await api.delete(
+    `/projects/${project}/repos/${repository}/pull-requests/${prId}/approve`
+  );
+  return {
+    content: [{ type: 'text', text: JSON.stringify(response.data, null, 2) }]
+  };
+}
